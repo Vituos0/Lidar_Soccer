@@ -1,0 +1,32 @@
+# Unity folders to ignore
+Library/
+Temp/
+Obj/
+Build/
+Builds/
+Logs/
+UserSettings/
+MemoryCaptures/
+
+# Asset Store Tools
+/Assets/AssetStoreTools*
+
+# VS/Rider IDE
+.vs/
+.vscode/
+*.csproj
+*.sln
+*.user
+*.unityproj
+*.pidb
+*.suo
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# OS Files
+.DS_Store
+Thumbs.db
+Desktop.ini
