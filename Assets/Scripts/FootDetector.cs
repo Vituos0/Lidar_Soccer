@@ -51,4 +51,44 @@ public class FootDetector : MonoBehaviour
             _hasDetected = false;
         }
     }
+    [Header("Gizmos Settings")]
+    public bool showGizmos = true;
+    public Color zoneColor = Color.green;
+
+    void OnDrawGizmos()
+    {
+        if (!showGizmos) return;
+
+        // Thiết lập màu sắc cho vùng quét
+        Gizmos.color = zoneColor;
+
+        // Lấy vị trí và hướng của GameObject chứa LiDAR
+        Vector3 center = transform.position;
+
+        // 1. VẼ VÙNG QUÉT THEO KHOẢNG CÁCH (Min/Max Distance)
+        // Vẽ vòng tròn nhỏ (vùng mù sát máy)
+        DrawWireArc(center, transform.up, transform.forward, 360f, minDist);
+
+        // Vẽ vòng tròn lớn (tầm xa tối đa)
+        Gizmos.color = Color.red; // Đổi màu cho vòng ngoài để dễ phân biệt
+        DrawWireArc(center, transform.up, transform.forward, 360f, maxDist);
+
+        // 2. VẼ CÁC VÙNG CHECKING (Nếu bạn dùng dạng ô vuông - Rect)
+        // Giả sử bạn có một biến Rect detectionArea;
+        // Gizmos.DrawWireCube(new Vector3(detectionArea.x, 0, detectionArea.y), new Vector3(detectionArea.width, 0.1f, detectionArea.height));
+    }
+
+    // Hàm phụ để vẽ hình tròn/hình quạt trên mặt phẳng XZ
+    void DrawWireArc(Vector3 center, Vector3 normal, Vector3 from, float angle, float radius)
+    {
+        Vector3 lastPoint = center + from * radius;
+        int segments = 30; // Độ mịn của đường cong
+        for (int i = 1; i <= segments; i++)
+        {
+            float a = (i / (float)segments) * angle;
+            Vector3 nextPoint = center + (Quaternion.AngleAxis(a, normal) * from) * radius;
+            Gizmos.DrawLine(lastPoint, nextPoint);
+            lastPoint = nextPoint;
+        }
+    }
 }

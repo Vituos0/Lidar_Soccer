@@ -3,129 +3,107 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using UnityEngine;
 
-// Đóng gói dữ liệu điểm theo phong cách OOP
-public struct LidarPoint
+public class PavoFootstepManager : MonoBehaviour
 {
-    public Vector3 Position;
-    public Color Color;
-}
+    [Header("Cấu hình mạng")]
+    public int port = 2368;
 
-public class PavoPointCloud : MonoBehaviour
-{
-    [Header("Network Settings")]
-    public int port = 2368; // Cổng mặc định của PAVO [cite: 220]
+    [Header("Vùng nhận diện (Mét)")]
+    public float minDistance = 0.3f; // Bỏ qua vật sát máy
+    public float maxDistance = 3.0f; // Khoảng cách cầu thủ đứng
 
-    [Header("Visualization Settings")]
-    public float scaleFactor = 0.001f; // Chuyển mm sang m (đơn vị Unity)
-    public Color pointColor = Color.cyan;
+    [Header("Hiệu ứng")]
+    public GameObject effectPrefab; // Kéo Prefab hiệu ứng vào đây
+    public float spawnInterval = 0.3f; // Khoảng cách thời gian giữa 2 lần hiện hiệu ứng
 
     private UdpClient udpClient;
     private Thread receiveThread;
     private bool isRunning = true;
-
-    // Hàng đợi an toàn để truyền dữ liệu giữa các Thread
-    private ConcurrentQueue<LidarPoint[]> dataQueue = new ConcurrentQueue<LidarPoint[]>();
-    private ParticleSystem pSystem;
+    private ConcurrentQueue<Vector3> footPositionQueue = new ConcurrentQueue<Vector3>();
+    private float lastEffectTime;
 
     void Start()
     {
-        pSystem = GetComponentInChildren<ParticleSystem>();
-
-        // Khởi tạo Thread nhận dữ liệu UDP
-        receiveThread = new Thread(new ThreadStart(ReceiveUDPData));
+        receiveThread = new Thread(ReceiveData);
         receiveThread.IsBackground = true;
         receiveThread.Start();
     }
 
-    private void ReceiveUDPData()
+    // 1. NHẬN DỮ LIỆU (Chạy ngầm)
+    private void ReceiveData()
     {
         try
         {
-            // SỬA LỖI SOCKET: Ép buộc hệ thống cho phép dùng chung cổng 2368
-            Socket socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-            socket.Bind(new IPEndPoint(IPAddress.Any, port));
-
-            udpClient = new UdpClient();
-            udpClient.Client = socket;
-            IPEndPoint anyIP = new IPEndPoint(IPAddress.Any, port);
+            Socket s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            s.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            s.Bind(new IPEndPoint(IPAddress.Any, port));
+            udpClient = new UdpClient { Client = s };
+            IPEndPoint ip = new IPEndPoint(IPAddress.Any, port);
 
             while (isRunning)
             {
-                byte[] data = udpClient.Receive(ref anyIP);
-                // THÊM DÒNG NÀY ĐỂ KIỂM TRA:
-                Debug.Log("Nhận được gói tin độ dài: " + data.Length);
-                if (data.Length == 126)
-                { 
-                    Debug.Log("Đã nhận gói tin!");
-                    LidarPoint[] points = ParsePacket(data);
-                    if (points != null) dataQueue.Enqueue(points);
-                }
+                byte[] data = udpClient.Receive(ref ip);
+                if (data.Length == 126) ParseAndDetect(data);
             }
         }
-        catch (Exception e) { Debug.LogError("Lỗi Socket: " + e.Message); }
+        catch (Exception e) { Debug.Log(e.Message); }
     }
 
-    private LidarPoint[] ParsePacket(byte[] data)
+    // 2. GIẢI MÃ & TÌM BÀN CHÂN
+    private void ParseAndDetect(byte[] data)
     {
-        LidarPoint[] framePoints = new LidarPoint[24]; // Mỗi gói chứa 24 điểm [cite: 222]
-        int pointIndex = 0;
+        List<Vector3> detectedPoints = new List<Vector3>();
 
-          for (int i = 0; i < 12; i++)
-        { // 12 nhóm dữ liệu [cite: 221]
-            int offset =  (i * 10); // Bỏ qua 8 byte Header [cite: 219]
+        for (int i = 0; i < 12; i++)
+        {
+            int offset = i * 10;
+            ushort azRaw = BitConverter.ToUInt16(new byte[] { data[offset], data[offset + 1] }, 0);
+            float angleRad = (azRaw / 100.0f) * Mathf.Deg2Rad;
 
-             // Giải mã Góc (Azimuth) - Đảo byte [cite: 299]
-            ushort azRaw = BitConverter.ToUInt16(new byte[] { data[offset + 2], data[offset + 3] }, 0);
-            float angleDeg = azRaw / 100.0f; // [cite: 301, 302]
-            float angleRad = (angleDeg + 90f) * Mathf.Deg2Rad; // Khớp hướng Unity
-
-              for (int p = 0; p < 2; p++)
-            { // Mỗi khối có 2 điểm [cite: 222]
-                int pOff = offset + 4 + (p * 3);
-
-                 // Giải mã Khoảng cách - Nhân đơn vị 2mm [cite: 314, 316]
+            for (int p = 0; p < 2; p++)
+            {
+                int pOff = offset + 2 + (p * 3);
                 ushort distRaw = BitConverter.ToUInt16(new byte[] { data[pOff], data[pOff + 1] }, 0);
-                float distance = distRaw * 2.0f;
+                float dist = distRaw * 2.0f * 0.001f; // Sang mét
 
-                  if (distance > 100f)
-                { // Lọc điểm thuộc vùng mù (0) hoặc nhiễu [cite: 347]
-                    float d = distance * scaleFactor;
-                    // Chuyển tọa độ Cực sang Descartes
-                    framePoints[pointIndex].Position = new Vector3(Mathf.Cos(angleRad) * d, 0, Mathf.Sin(angleRad) * d);
-                    framePoints[pointIndex].Color = pointColor;
+                if (dist >= minDistance && dist <= maxDistance)
+                {
+                    // Tính tọa độ X, Z trên mặt sàn
+                    float x = Mathf.Sin(angleRad) * dist;
+                    float z = Mathf.Cos(angleRad) * dist;
+                    detectedPoints.Add(new Vector3(x, 0, z));
                 }
-                pointIndex++;
             }
         }
-        return framePoints;
+
+        // Nếu có cụm điểm (ví dụ > 10 điểm), tính trung tâm của bàn chân
+        if (detectedPoints.Count > 10)
+        {
+            Vector3 center = Vector3.zero;
+            foreach (var p in detectedPoints) center += p;
+            center /= detectedPoints.Count;
+            footPositionQueue.Enqueue(center);
+        }
     }
 
+    // 3. HIỂN THỊ (Chạy luồng chính)
     void Update()
     {
-        // Vẽ các điểm lên Particle System từ Main Thread
-        while (dataQueue.TryDequeue(out LidarPoint[] newPoints))
+        if (footPositionQueue.TryDequeue(out Vector3 footPos))
         {
-            Debug.Log("Đang vẽ: " + newPoints.Length + " điểm");
-            foreach (var pt in newPoints)
+            if (Time.time - lastEffectTime > spawnInterval)
             {
-                if (pt.Position != Vector3.zero)
-                {
-                    var emitParams = new ParticleSystem.EmitParams();
-                    emitParams.position = pt.Position;
-                    emitParams.startColor = pt.Color;
-                    pSystem.Emit(emitParams, 1);
-                }
+                // Tạo hiệu ứng tại vị trí bàn chân
+                Instantiate(effectPrefab, footPos, Quaternion.identity);
+                lastEffectTime = Time.time;
             }
         }
     }
 
-    void OnDestroy()
-    {
-        isRunning = false;
-        udpClient?.Close();
-        receiveThread?.Abort();
-    }
+    void OnDestroy() { isRunning = false; udpClient?.Close(); receiveThread?.Abort(); }
+
+
 }
